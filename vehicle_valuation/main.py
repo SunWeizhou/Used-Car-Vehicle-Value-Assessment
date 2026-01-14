@@ -20,7 +20,9 @@ sys.path.insert(0, str(project_root))
 
 from utils.preprocessing import load_and_clean_data, print_data_summary
 from models.lifecycle import prepare_weibull_data, WeibullModel
+from models.behavior import BehaviorModel
 import numpy as np
+import pandas as pd
 
 
 def main():
@@ -133,6 +135,98 @@ def main():
 
     print("\n" + "="*80)
     print("✓ Weibull 生命周期建模完成！")
+    print("="*80 + "\n")
+
+    # 4. 行为模型 - 使用强度与保养规范度评估
+    print("\n" + "="*80)
+    print("步骤 4: ECDF 行为模型")
+    print("="*80)
+
+    # 4.1 尝试加载 LLM 结果
+    llm_results_path = Path(__file__).parent / "data" / "llm_parsed_results.csv"
+    df_llm = None
+    if llm_results_path.exists():
+        print(f"\n【加载 LLM 结果】")
+        print(f"  找到 LLM 结果文件: {llm_results_path.name}")
+        try:
+            df_llm = pd.read_csv(llm_results_path)
+            print(f"  LLM 结果记录数: {len(df_llm):,}")
+        except Exception as e:
+            print(f"  ⚠ 读取 LLM 结果失败: {e}")
+            df_llm = None
+    else:
+        print(f"\n【使用关键词规则】")
+        print(f"  未找到 LLM 结果文件，使用关键词规则识别保养")
+
+    # 4.2 拟合行为模型
+    print("\n【模型拟合】")
+    behavior_model = BehaviorModel()
+    behavior_model.fit(df_base, df_llm=df_llm)
+
+    # 4.3 显示统计信息
+    print(f"\n【数据统计】")
+    print(f"  车辆数量: {behavior_model.stats['n_vehicles']:,}")
+    print(f"  平均日里程 - 均值: {behavior_model.stats['avg_daily_mileage_mean']:.2f} km/天")
+    print(f"  平均日里程 - 中位数: {behavior_model.stats['avg_daily_mileage_median']:.2f} km/天")
+    print(f"  保养密度 - 均值: {behavior_model.stats['maint_density_mean']:.4f} 次/万公里")
+    print(f"  保养密度 - 中位数: {behavior_model.stats['maint_density_median']:.4f} 次/万公里")
+
+    # 4.4 准备车辆数据用于评分
+    # 按 VIN 聚合获取每辆车的里程、天数、保养次数
+    df_base_copy = df_base.copy()
+    df_base_copy['SETTLE_DATE'] = pd.to_datetime(df_base_copy['SETTLE_DATE'])
+
+    # 识别保养
+    if df_llm is None:
+        maintenance_keywords = ['保养', '更换机油', '机滤', '三滤', '润滑油']
+        df_base_copy['is_maintenance'] = df_base_copy['FAULT_DESC'].str.contains(
+            '|'.join(maintenance_keywords), na=False
+        )
+    else:
+        df_base_copy = df_base_copy.merge(
+            df_llm[['ID', 'Event_Type']],
+            on='ID',
+            how='left'
+        )
+        df_base_copy['is_maintenance'] = (df_base_copy['Event_Type'] == '保养').fillna(False)
+
+    # 聚合
+    vehicle_data = df_base_copy.groupby('VIN').agg({
+        'REPAIR_MILEAGE': 'max',
+        'SETTLE_DATE': ['min', 'max'],
+        'is_maintenance': 'sum'
+    }).reset_index()
+    vehicle_data.columns = ['VIN', 'max_mileage', 'first_date', 'last_date', 'maint_count']
+    vehicle_data['span_days'] = (vehicle_data['last_date'] - vehicle_data['first_date']).dt.days
+    vehicle_data.loc[vehicle_data['span_days'] < 30, 'span_days'] = 30
+
+    # 4.5 案例展示（沿用之前的 5 辆车）
+    print("\n【案例展示 - 同样的 5 辆车】")
+    for idx, row in sample_vins.iterrows():
+        vin = row['VIN']
+        t_current = row['t']
+
+        # 从 vehicle_data 获取信息
+        veh_row = vehicle_data[vehicle_data['VIN'] == vin]
+        if veh_row.empty:
+            continue
+
+        mileage = veh_row.iloc[0]['max_mileage']
+        days = veh_row.iloc[0]['span_days']
+        maint_count = int(veh_row.iloc[0]['maint_count'])
+
+        # 预测得分
+        usage_score, maint_score = behavior_model.predict_scores(mileage, days, maint_count)
+
+        print(f"\n车辆 {vin[:8]}...")
+        print(f"  总里程: {mileage:,.0f} km")
+        print(f"  使用天数: {days} 天")
+        print(f"  保养次数: {maint_count} 次")
+        print(f"  使用强度得分: {usage_score:.2f} / 100 (越低越激烈)")
+        print(f"  保养规范度得分: {maint_score:.2f} / 100 (越高越规范)")
+
+    print("\n" + "="*80)
+    print("✓ ECDF 行为模型建模完成！")
     print("="*80 + "\n")
 
 
