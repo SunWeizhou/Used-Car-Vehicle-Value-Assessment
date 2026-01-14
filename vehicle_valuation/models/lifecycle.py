@@ -148,7 +148,16 @@ class WeibullModel:
         score : float
             生命周期得分 (0-100)
         """
-        pass
+        if self.k is None or self.lambda_ is None:
+            raise RuntimeError("模型尚未拟合，请先调用 fit() 方法")
+
+        # 计算生存概率 S(t) = exp(-(t/λ)^k)
+        survival_prob = np.exp(-((t_current / self.lambda_) ** self.k))
+
+        # 转换为 0-100 分数
+        score = 100.0 * survival_prob
+
+        return float(score)
 
     def get_params(self) -> Dict[str, float]:
         """
@@ -159,7 +168,13 @@ class WeibullModel:
         params : dict
             包含 k 和 lambda_ 的字典
         """
-        pass
+        if self.k is None or self.lambda_ is None:
+            raise RuntimeError("模型尚未拟合，请先调用 fit() 方法")
+
+        return {
+            'k': self.k,
+            'lambda_': self.lambda_
+        }
 
 
 def _weibull_neg_log_likelihood(params: np.ndarray, t: np.ndarray, event: np.ndarray) -> float:
