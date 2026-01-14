@@ -42,7 +42,34 @@ def prepare_weibull_data(df_base: pd.DataFrame) -> pd.DataFrame:
     result_df : pd.DataFrame
         包含 VIN, t (寿命里程), event (失效标记) 的 DataFrame
     """
-    pass
+    # 确保 SETTLE_DATE 是 datetime 类型
+    df_base = df_base.copy()
+    df_base['SETTLE_DATE'] = pd.to_datetime(df_base['SETTLE_DATE'])
+
+    # 1. 获取数据集全局最大日期作为当前日期
+    current_date = df_base['SETTLE_DATE'].max()
+
+    # 2. 按 VIN 分组聚合
+    vehicle_stats = df_base.groupby('VIN').agg({
+        'REPAIR_MILEAGE': 'max',  # 最大里程作为寿命 t
+        'SETTLE_DATE': 'max'      # 最后出现日期
+    }).reset_index()
+
+    vehicle_stats.rename(columns={
+        'REPAIR_MILEAGE': 't',
+        'SETTLE_DATE': 'last_seen_date'
+    }, inplace=True)
+
+    # 3. 定义失效事件 - 关键：正确处理右截断
+    # 如果最后出现日期距离 current_date 超过 730 天 (2年)，则认为已报废
+    # 其他车辆标记为 event=0 (右截断/存活)，这些样本在 MLE 中使用 S(t) 而非 f(t)
+    vehicle_stats['days_since_last_seen'] = (current_date - vehicle_stats['last_seen_date']).dt.days
+    vehicle_stats['event'] = (vehicle_stats['days_since_last_seen'] > 730).astype(int)
+
+    # 4. 返回结果
+    result_df = vehicle_stats[['VIN', 't', 'event']].copy()
+
+    return result_df
 
 
 class WeibullModel:
