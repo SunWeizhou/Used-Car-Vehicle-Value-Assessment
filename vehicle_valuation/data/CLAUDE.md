@@ -7,6 +7,7 @@
 
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
+| #818 | 1:15 AM | 🟣 | ECDF-based behavior model integrated into main pipeline | ~358 |
 | #776 | 12:44 AM | ⚖️ | Adopted Chinese national standards (GB/T) for vehicle maintenance severity classification | ~397 |
 | #765 | 12:34 AM | 🟣 | Data preprocessing pipeline implemented and validated | ~342 |
 | #755 | 12:19 AM | 🟣 | Data preprocessing pipeline implemented for vehicle valuation | ~284 |
