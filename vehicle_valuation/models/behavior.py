@@ -49,7 +49,74 @@ class BehaviorModel:
         df_llm : pd.DataFrame, optional
             LLM 结构化结果表，包含 Event_Type 列用于识别保养
         """
-        pass
+        # 1. 数据准备
+        df_base = df_base.copy()
+        df_base['SETTLE_DATE'] = pd.to_datetime(df_base['SETTLE_DATE'])
+
+        # 2. 如果没有 LLM 结果，使用简单规则识别保养
+        if df_llm is None:
+            # 简单规则：故障描述包含保养关键词
+            maintenance_keywords = ['保养', '更换机油', '机滤', '三滤', '润滑油']
+            df_base['is_maintenance'] = df_base['FAULT_DESC'].str.contains(
+                '|'.join(maintenance_keywords), na=False
+            )
+        else:
+            # 使用 LLM 结果：将 Event_Type 映射回原数据
+            # 假设 df_llm 有 ID 列可以与 df_base 关联
+            df_base = df_base.merge(
+                df_llm[['ID', 'Event_Type']],
+                on='ID',
+                how='left'
+            )
+            df_base['is_maintenance'] = (df_base['Event_Type'] == '保养').fillna(False)
+
+        # 3. 按 VIN 聚合计算指标
+        vehicle_stats = df_base.groupby('VIN').agg({
+            'REPAIR_MILEAGE': 'max',  # 最大里程
+            'SETTLE_DATE': ['min', 'max'],  # 首次和最后出现日期
+            'is_maintenance': 'sum'  # 保养次数
+        }).reset_index()
+
+        # 展平多级列名
+        vehicle_stats.columns = ['VIN', 'max_mileage', 'first_date', 'last_date', 'maint_count']
+
+        # 4. 计算使用天数 (span_days)
+        vehicle_stats['span_days'] = (vehicle_stats['last_date'] - vehicle_stats['first_date']).dt.days
+
+        # 过滤异常值：span_days 太小 (< 30天) 的车辆设为 30 天
+        vehicle_stats.loc[vehicle_stats['span_days'] < 30, 'span_days'] = 30
+
+        # 5. 计算指标
+        # avg_daily_mileage = 总里程 / 使用天数
+        vehicle_stats['avg_daily_mileage'] = vehicle_stats['max_mileage'] / vehicle_stats['span_days']
+
+        # maint_density = 保养次数 / 总里程 * 10000 (每万公里保养次数)
+        vehicle_stats['maint_density'] = vehicle_stats['maint_count'] / vehicle_stats['max_mileage'] * 10000
+
+        # 6. 过滤无效数据
+        # 移除 avg_daily_mileage 或 maint_density 为 NaN 或 Inf 的行
+        vehicle_stats = vehicle_stats[
+            (vehicle_stats['avg_daily_mileage'] > 0) &
+            (vehicle_stats['avg_daily_mileage'] < np.inf) &
+            (vehicle_stats['maint_density'] >= 0) &
+            (vehicle_stats['maint_density'] < np.inf)
+        ]
+
+        # 7. 拟合 ECDF
+        self.ecdf_usage = ECDF(vehicle_stats['avg_daily_mileage'].values)
+        self.ecdf_maint = ECDF(vehicle_stats['maint_density'].values)
+        self.fitted = True
+
+        # 保存统计信息（用于调试）
+        self.stats = {
+            'n_vehicles': len(vehicle_stats),
+            'avg_daily_mileage_mean': vehicle_stats['avg_daily_mileage'].mean(),
+            'avg_daily_mileage_median': vehicle_stats['avg_daily_mileage'].median(),
+            'maint_density_mean': vehicle_stats['maint_density'].mean(),
+            'maint_density_median': vehicle_stats['maint_density'].median()
+        }
+
+        return self
 
     def predict_scores(self, mileage: float, days: int, maint_count: int) -> Tuple[float, float]:
         """
@@ -71,7 +138,22 @@ class BehaviorModel:
         maint_score : float
             保养规范度得分 (0-100)，越高表示保养越规范
         """
-        pass
+        if not self.fitted:
+            raise RuntimeError("模型尚未拟合，请先调用 fit() 方法")
+
+        # 1. 计算指标
+        avg_daily_mileage, maint_density = self._compute_metrics(mileage, days, maint_count)
+
+        # 2. 使用 ECDF 计算得分
+        # 使用强度得分: 100 * (1 - F(日里程)) - 跑得越凶，得分越低
+        usage_percentile = self.ecdf_usage(avg_daily_mileage)
+        usage_score = 100.0 * (1.0 - usage_percentile)
+
+        # 保养规范度得分: 100 * F(保养密度) - 保养越勤，得分越高
+        maint_percentile = self.ecdf_maint(maint_density)
+        maint_score = 100.0 * maint_percentile
+
+        return float(usage_score), float(maint_score)
 
     def _compute_metrics(
         self,
@@ -98,4 +180,14 @@ class BehaviorModel:
         maint_density : float
             保养密度 (每万公里保养次数)
         """
-        pass
+        # 处理异常值
+        if days < 30:
+            days = 30
+
+        # avg_daily_mileage = 总里程 / 使用天数
+        avg_daily_mileage = mileage / days
+
+        # maint_density = 保养次数 / 总里程 * 10000 (每万公里保养次数)
+        maint_density = maint_count / mileage * 10000 if mileage > 0 else 0.0
+
+        return avg_daily_mileage, maint_density
