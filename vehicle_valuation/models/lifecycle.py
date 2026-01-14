@@ -107,7 +107,30 @@ class WeibullModel:
         --------
         self : WeibullModel
         """
-        pass
+        # 初始参数猜测
+        # k: 形状参数，通常在 1-5 之间
+        # lambda: 尺度参数，使用数据的平均值作为初始值
+        k_init = 2.0
+        lambda_init = np.mean(t)
+
+        # 使用 scipy.optimize.minimize 进行 MLE 优化
+        result = minimize(
+            _weibull_neg_log_likelihood,
+            x0=[k_init, lambda_init],
+            args=(t, event),
+            method='L-BFGS-B',
+            bounds=[(0.1, 10.0), (1000.0, None)],  # k: [0.1, 10], lambda: [1000, inf]
+            options={'maxiter': 1000}
+        )
+
+        if not result.success:
+            raise RuntimeError(f"MLE 优化失败: {result.message}")
+
+        # 保存拟合参数
+        self.k = result.x[0]
+        self.lambda_ = result.x[1]
+
+        return self
 
     def predict_score(self, t_current: float) -> float:
         """
