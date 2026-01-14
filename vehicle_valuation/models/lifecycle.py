@@ -150,6 +150,8 @@ def _weibull_neg_log_likelihood(params: np.ndarray, t: np.ndarray, event: np.nda
     对数似然:
     ln(L) = Σ[event[i] * ln(f(t[i])) + (1-event[i]) * ln(S(t[i]))]
 
+    这正是生存分析中处理右截断的标准方法！
+
     Parameters:
     -----------
     params : np.ndarray
@@ -164,4 +166,28 @@ def _weibull_neg_log_likelihood(params: np.ndarray, t: np.ndarray, event: np.nda
     nll : float
         负对数似然值
     """
-    pass
+    k, lambda_ = params
+
+    # 避免除零和负值
+    if k <= 0 or lambda_ <= 0:
+        return np.inf
+
+    # Weibull 分布函数
+    # PDF: f(t) = (k/λ) * (t/λ)^(k-1) * exp(-(t/λ)^k)
+    # CDF: F(t) = 1 - exp(-(t/λ)^k)
+    # Survival: S(t) = exp(-(t/λ)^k)
+
+    # 计算 (t/λ)^k，添加小常数避免 log(0)
+    z = (t / lambda_) ** k
+
+    # log(f(t)) = log(k/λ) + (k-1)*log(t/λ) - z
+    log_f = np.log(k / lambda_) + (k - 1) * np.log(t / lambda_ + 1e-10) - z
+
+    # log(S(t)) = -z
+    log_s = -z
+
+    # 对数似然：event=1 用 log(f(t)), event=0 用 log(S(t))
+    # 这就是处理右截断的标准公式！
+    log_likelihood = np.sum(event * log_f + (1 - event) * log_s)
+
+    return -log_likelihood
