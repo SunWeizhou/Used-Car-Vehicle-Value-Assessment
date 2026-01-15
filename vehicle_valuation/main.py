@@ -256,31 +256,107 @@ def main():
         print(f"  故障率强度 (Λ) - 最大值: {reliability_model.stats['lambda_max']:.6f} /km")
         print(f"  群体基准 (Λ_pop): {reliability_model.lambda_pop:.6f} /km")
 
-        # 5.4 案例展示（沿用之前的 5 辆车）
-        print("\n【案例展示 - 同样的 5 辆车】")
-        for idx, row in sample_vins.iterrows():
-            vin = row['VIN']
-
-            # 预测得分
-            reliability_score = reliability_model.predict_score(vin)
-
-            if reliability_score is not None:
-                print(f"\n车辆 {vin[:8]}...")
-                print(f"  故障率强度得分: {reliability_score:.2f} / 100 (越高越可靠)")
-
-                # 显示详细数据
-                profile = reliability_model.get_vehicle_profile(vin)
-                if profile:
-                    print(f"  LLM 记录数: {profile['record_count']}")
-                    print(f"  总故障分数: {profile['total_fault_score']:.0f}")
-                    print(f"  最大里程: {profile['max_mileage']:,.0f} km")
-                    print(f"  故障率强度 Λ: {profile['lambda']:.6f} /km")
-            else:
-                print(f"\n车辆 {vin[:8]}...")
-                print(f"  ⚠ 该车辆不在 LLM 样本中，无法计算可靠性得分")
-
         print("\n" + "="*80)
         print("✓ 故障率强度模型建模完成！")
+        print("="*80 + "\n")
+
+        # 6. 车辆档案整合 (Vehicle Profiling)
+        print("\n" + "="*80)
+        print("步骤 6: 车辆档案整合")
+        print("="*80)
+
+        # 6.1 获取被 LLM 处理过的车辆 VIN 列表
+        print("\n【建立车辆档案】")
+        llm_vins = reliability_model.vehicle_profiles['VIN'].tolist()
+        print(f"  从 reliability_model 中提取 {len(llm_vins)} 辆被 LLM 处理过的车辆")
+
+        # 6.2 准备车辆数据（用于行为模型）
+        df_base_copy = df_base.copy()
+        df_base_copy['SETTLE_DATE'] = pd.to_datetime(df_base_copy['SETTLE_DATE'])
+
+        # 识别保养
+        if df_llm is None:
+            maintenance_keywords = ['保养', '更换机油', '机滤', '三滤', '润滑油']
+            df_base_copy['is_maintenance'] = df_base_copy['FAULT_DESC'].str.contains(
+                '|'.join(maintenance_keywords), na=False
+            )
+        else:
+            df_base_copy = df_base_copy.merge(
+                df_llm[['ID', 'Event_Type']],
+                on='ID',
+                how='left'
+            )
+            df_base_copy['is_maintenance'] = (df_base_copy['Event_Type'] == '保养').fillna(False)
+
+        # 聚合
+        vehicle_data = df_base_copy.groupby('VIN').agg({
+            'REPAIR_MILEAGE': 'max',
+            'SETTLE_DATE': ['min', 'max'],
+            'is_maintenance': 'sum'
+        }).reset_index()
+        vehicle_data.columns = ['VIN', 'max_mileage', 'first_date', 'last_date', 'maint_count']
+        vehicle_data['span_days'] = (vehicle_data['last_date'] - vehicle_data['first_date']).dt.days
+        vehicle_data.loc[vehicle_data['span_days'] < 30, 'span_days'] = 30
+
+        # 6.3 遍历这些 VIN，构建完整的车辆档案
+        print(f"  正在整合车辆档案...")
+        profiles_list = []
+
+        for vin in llm_vins:
+            # 获取里程和天数
+            veh_row = vehicle_data[vehicle_data['VIN'] == vin]
+            if veh_row.empty:
+                continue
+
+            mileage = veh_row.iloc[0]['max_mileage']
+            days = veh_row.iloc[0]['span_days']
+            maint_count = int(veh_row.iloc[0]['maint_count'])
+
+            # 获取生命周期得分
+            weibull_score = model.predict_score(mileage)
+
+            # 获取行为得分
+            usage_score, maint_score = behavior_model.predict_scores(mileage, days, maint_count)
+
+            # 获取可靠性得分
+            reliability_score = reliability_model.predict_score(vin)
+
+            # 获取 LLM 记录数
+            llm_profile = reliability_model.get_vehicle_profile(vin)
+            llm_records = llm_profile['record_count'] if llm_profile else 0
+
+            # 构建档案字典
+            profile = {
+                'VIN': vin[:10] + '...',  # 只显示前 10 位
+                'Weibull_Score': round(weibull_score, 2),
+                'Usage_Score': round(usage_score, 2),
+                'Maint_Score': round(maint_score, 2),
+                'Reliability_Score': round(reliability_score, 2) if reliability_score is not None else None,
+                'LLM_Records': llm_records
+            }
+
+            profiles_list.append(profile)
+
+        # 6.4 创建最终车辆画像表
+        final_vehicle_profiles = pd.DataFrame(profiles_list)
+
+        # 6.5 展示最终车辆画像表
+        print(f"\n【最终车辆画像表】")
+        print(f"  共 {len(final_vehicle_profiles)} 辆车的完整档案")
+        print("\n" + "="*80)
+        print(final_vehicle_profiles.to_string(index=False))
+        print("="*80 + "\n")
+
+        # 6.6 统计摘要
+        print("【档案统计摘要】")
+        print(f"  生命周期得分 - 均值: {final_vehicle_profiles['Weibull_Score'].mean():.2f}")
+        print(f"  使用强度得分 - 均值: {final_vehicle_profiles['Usage_Score'].mean():.2f} (越低越激烈)")
+        print(f"  保养规范度得分 - 均值: {final_vehicle_profiles['Maint_Score'].mean():.2f} (越高越规范)")
+        print(f"  可靠性得分 - 均值: {final_vehicle_profiles['Reliability_Score'].mean():.2f} (越高越可靠)")
+        print(f"  平均 LLM 记录数: {final_vehicle_profiles['LLM_Records'].mean():.2f}")
+
+        print("\n" + "="*80)
+        print("✓ 车辆档案整合完成！")
         print("="*80 + "\n")
 
 
