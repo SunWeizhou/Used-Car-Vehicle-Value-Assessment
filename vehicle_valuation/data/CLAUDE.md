@@ -7,6 +7,8 @@
 
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
+| #891 | 11:59 AM | 🟣 | DeepSeek API密钥配置并运行LLM处理测试 | ~123 |
+| #890 | 11:56 AM | 🟣 | LLM repair hours integration analysis completed | ~183 |
 | #818 | 1:15 AM | 🟣 | ECDF-based behavior model integrated into main pipeline | ~358 |
 | #776 | 12:44 AM | ⚖️ | Adopted Chinese national standards (GB/T) for vehicle maintenance severity classification | ~397 |
 | #765 | 12:34 AM | 🟣 | Data preprocessing pipeline implemented and validated | ~342 |

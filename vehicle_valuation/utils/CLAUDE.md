@@ -7,5 +7,22 @@
 
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
+| #885 | 11:39 AM | 🔄 | LLM结构化处理添加实时推理过程验证输出 | ~92 |
+| #884 | " | 🔄 | LLM prompt enhanced with repair hours context for improved severity classification | ~109 |
+| #883 | " | 🟣 | LLM prompt enhanced with repair hours for severity classification | ~110 |
+| #882 | " | 🟣 | Enhanced LLM prompt with repair hours-based severity adjustment logic | ~157 |
+| #881 | 11:37 AM | 🟣 | LLM-based maintenance record structuring implemented with Chinese national standards | ~473 |
+| #809 | 1:11 AM | 🟣 | Weibull lifecycle model successfully implemented and tested on real vehicle data | ~244 |
+| #783 | 1:03 AM | 🔵 | Preprocessing module reviewed for LLM integration | ~185 |
+| #777 | 12:45 AM | 🔄 | LLM prompt enhanced with Chinese national standards (GB/T) compliance | ~293 |
+| #776 | 12:44 AM | ⚖️ | Adopted Chinese national standards (GB/T) for vehicle maintenance severity classification | ~397 |
+| #775 | " | 🔵 | LLM-based repair record classification system implemented | ~288 |
+| #772 | 12:37 AM | 🟣 | DeepSeek API integration successfully configured and tested | ~204 |
 | #769 | 12:36 AM | 🟣 | LLM-based maintenance record structuring module implemented | ~365 |
+| #768 | " | 🟣 | LLM-based structured data extraction module implemented | ~302 |
+| #767 | " | 🔵 | LLM structuring utility file created but not yet implemented | ~181 |
+| #765 | 12:34 AM | 🟣 | Data preprocessing pipeline implemented and validated | ~342 |
+| #760 | 12:31 AM | 🟣 | Data preprocessing pipeline implemented for vehicle valuation | ~276 |
+| #755 | 12:19 AM | 🟣 | Data preprocessing pipeline implemented for vehicle valuation | ~284 |
+| #754 | " | 🟣 | Data preprocessing module structure created | ~166 |
 </claude-mem-context>
