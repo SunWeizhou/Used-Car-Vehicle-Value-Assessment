@@ -21,6 +21,7 @@ sys.path.insert(0, str(project_root))
 from utils.preprocessing import load_and_clean_data, print_data_summary
 from models.lifecycle import prepare_weibull_data, WeibullModel
 from models.behavior import BehaviorModel
+from models.reliability import ReliabilityModel
 import numpy as np
 import pandas as pd
 
@@ -227,6 +228,41 @@ def main():
 
     print("\n" + "="*80)
     print("✓ ECDF 行为模型建模完成！")
+    print("="*80 + "\n")
+
+    # 5. 可靠性模型 - 故障率强度评估
+    print("\n" + "="*80)
+    print("步骤 5: 故障率强度模型")
+    print("="*80)
+
+    # 5.1 拟合可靠性模型
+    print("\n【模型拟合】")
+    reliability_model = ReliabilityModel()
+    reliability_model.fit(df_base, df_llm=df_llm)
+
+    # 5.2 显示统计信息
+    print(f"\n【数据统计】")
+    print(f"  车辆数量: {reliability_model.stats['n_vehicles']:,}")
+    print(f"  故障率强度 (Λ) - 均值: {reliability_model.stats['lambda_mean']:.6f} /km")
+    print(f"  故障率强度 (Λ) - 中位数: {reliability_model.stats['lambda_median']:.6f} /km")
+    print(f"  故障率强度 (Λ) - 最小值: {reliability_model.stats['lambda_min']:.6f} /km")
+    print(f"  故障率强度 (Λ) - 最大值: {reliability_model.stats['lambda_max']:.6f} /km")
+    print(f"  群体基准 (Λ_pop): {reliability_model.baseline_lambda:.6f} /km")
+    print(f"  平均总权重: {reliability_model.stats['total_weight_mean']:.2f}")
+
+    # 5.3 案例展示（沿用之前的 5 辆车）
+    print("\n【案例展示 - 同样的 5 辆车】")
+    for idx, row in sample_vins.iterrows():
+        vin = row['VIN']
+
+        # 预测得分
+        reliability_score = reliability_model.predict_score(vin)
+
+        print(f"\n车辆 {vin[:8]}...")
+        print(f"  故障率强度得分: {reliability_score:.2f} / 100 (越高越可靠)")
+
+    print("\n" + "="*80)
+    print("✓ 故障率强度模型建模完成！")
     print("="*80 + "\n")
 
 
