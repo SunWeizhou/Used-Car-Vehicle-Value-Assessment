@@ -22,6 +22,7 @@ from utils.preprocessing import load_and_clean_data, print_data_summary
 from models.lifecycle import prepare_weibull_data, WeibullModel
 from models.behavior import BehaviorModel
 from models.reliability import ReliabilityModel
+from models.weighting import PCAWeightingModel
 import numpy as np
 import pandas as pd
 
@@ -167,8 +168,17 @@ def main():
     # 4.3 显示统计信息
     print(f"\n【数据统计】")
     print(f"  车辆数量: {behavior_model.stats['n_vehicles']:,}")
-    print(f"  平均日里程 - 均值: {behavior_model.stats['avg_daily_mileage_mean']:.2f} km/天")
-    print(f"  平均日里程 - 中位数: {behavior_model.stats['avg_daily_mileage_median']:.2f} km/天")
+
+    print(f"\n【使用强度指标对比 (修正版 vs 原始版)】")
+    print(f"  修正版 (里程增量法):")
+    print(f"    - 均值: {behavior_model.stats['avg_daily_mileage_mean']:.2f} km/天")
+    print(f"    - 中位数: {behavior_model.stats['avg_daily_mileage_median']:.2f} km/天")
+    print(f"  原始版 (累积里程法):")
+    print(f"    - 均值: {behavior_model.stats['avg_daily_mileage_original_mean']:.2f} km/天")
+    print(f"    - 中位数: {behavior_model.stats['avg_daily_mileage_original_median']:.2f} km/天")
+    print(f"  改进幅度: {(1 - behavior_model.stats['avg_daily_mileage_mean'] / behavior_model.stats['avg_daily_mileage_original_mean'])*100:.1f}%")
+
+    print(f"\n【保养规范度】")
     print(f"  保养密度 - 均值: {behavior_model.stats['maint_density_mean']:.4f} 次/万公里")
     print(f"  保养密度 - 中位数: {behavior_model.stats['maint_density_median']:.4f} 次/万公里")
 
@@ -193,11 +203,11 @@ def main():
 
     # 聚合
     vehicle_data = df_base_copy.groupby('VIN').agg({
-        'REPAIR_MILEAGE': 'max',
+        'REPAIR_MILEAGE': ['min', 'max'],
         'SETTLE_DATE': ['min', 'max'],
         'is_maintenance': 'sum'
     }).reset_index()
-    vehicle_data.columns = ['VIN', 'max_mileage', 'first_date', 'last_date', 'maint_count']
+    vehicle_data.columns = ['VIN', 'min_mileage', 'max_mileage', 'first_date', 'last_date', 'maint_count']
     vehicle_data['span_days'] = (vehicle_data['last_date'] - vehicle_data['first_date']).dt.days
     vehicle_data.loc[vehicle_data['span_days'] < 30, 'span_days'] = 30
 
@@ -212,12 +222,13 @@ def main():
         if veh_row.empty:
             continue
 
+        min_mileage = veh_row.iloc[0]['min_mileage']
         mileage = veh_row.iloc[0]['max_mileage']
         days = veh_row.iloc[0]['span_days']
         maint_count = int(veh_row.iloc[0]['maint_count'])
 
-        # 预测得分
-        usage_score, maint_score = behavior_model.predict_scores(mileage, days, maint_count)
+        # 预测得分（使用修正版：传入 min_mileage）
+        usage_score, maint_score = behavior_model.predict_scores(mileage, days, maint_count, min_mileage=min_mileage)
 
         print(f"\n车辆 {vin[:8]}...")
         print(f"  总里程: {mileage:,.0f} km")
@@ -290,11 +301,11 @@ def main():
 
         # 聚合
         vehicle_data = df_base_copy.groupby('VIN').agg({
-            'REPAIR_MILEAGE': 'max',
+            'REPAIR_MILEAGE': ['min', 'max'],
             'SETTLE_DATE': ['min', 'max'],
             'is_maintenance': 'sum'
         }).reset_index()
-        vehicle_data.columns = ['VIN', 'max_mileage', 'first_date', 'last_date', 'maint_count']
+        vehicle_data.columns = ['VIN', 'min_mileage', 'max_mileage', 'first_date', 'last_date', 'maint_count']
         vehicle_data['span_days'] = (vehicle_data['last_date'] - vehicle_data['first_date']).dt.days
         vehicle_data.loc[vehicle_data['span_days'] < 30, 'span_days'] = 30
 
@@ -308,6 +319,7 @@ def main():
             if veh_row.empty:
                 continue
 
+            min_mileage = veh_row.iloc[0]['min_mileage']
             mileage = veh_row.iloc[0]['max_mileage']
             days = veh_row.iloc[0]['span_days']
             maint_count = int(veh_row.iloc[0]['maint_count'])
@@ -315,8 +327,8 @@ def main():
             # 获取生命周期得分
             weibull_score = model.predict_score(mileage)
 
-            # 获取行为得分
-            usage_score, maint_score = behavior_model.predict_scores(mileage, days, maint_count)
+            # 获取行为得分（使用修正版：传入 min_mileage）
+            usage_score, maint_score = behavior_model.predict_scores(mileage, days, maint_count, min_mileage=min_mileage)
 
             # 获取可靠性得分
             reliability_score = reliability_model.predict_score(vin)
@@ -357,6 +369,62 @@ def main():
 
         print("\n" + "="*80)
         print("✓ 车辆档案整合完成！")
+        print("="*80 + "\n")
+
+        # 7. PCA 组合赋权模型 (第 4 章)
+        print("\n" + "="*80)
+        print("步骤 7: PCA 组合赋权模型")
+        print("="*80)
+
+        # 7.1 拟合 PCA 权重模型
+        print("\n【权重计算】")
+        weighting_model = PCAWeightingModel()
+        weighting_model.fit(final_vehicle_profiles)
+
+        # 7.2 计算最终得分
+        print("\n【综合得分计算】")
+        final_profiles_with_score = weighting_model.calculate_score(final_vehicle_profiles)
+
+        # 7.3 展示最终得分表 (前 10 名)
+        print("\n【最终车辆画像表 - 前 10 名】")
+        top_10 = final_profiles_with_score.nlargest(10, 'Final_Score')
+        print("\n" + "="*100)
+        print(top_10.to_string(index=False))
+        print("="*100 + "\n")
+
+        # 7.4 展示车况最好和最差的车
+        best_vehicle = final_profiles_with_score.loc[final_profiles_with_score['Final_Score'].idxmax()]
+        worst_vehicle = final_profiles_with_score.loc[final_profiles_with_score['Final_Score'].idxmin()]
+
+        print("【车况分析】")
+        print("\n🏆 车况最好的车:")
+        print(f"  VIN: {best_vehicle['VIN']}")
+        print(f"  综合得分: {best_vehicle['Final_Score']:.2f}")
+        print(f"  生命周期: {best_vehicle['Weibull_Score']:.2f}")
+        print(f"  使用强度 (反转后): {100-best_vehicle['Usage_Score']:.2f} (原始: {best_vehicle['Usage_Score']:.2f})")
+        print(f"  保养规范度: {best_vehicle['Maint_Score']:.2f}")
+        print(f"  可靠性: {best_vehicle['Reliability_Score']:.2f}")
+        print(f"  LLM 记录数: {int(best_vehicle['LLM_Records'])}")
+
+        print("\n⚠ 车况最差的车:")
+        print(f"  VIN: {worst_vehicle['VIN']}")
+        print(f"  综合得分: {worst_vehicle['Final_Score']:.2f}")
+        print(f"  生命周期: {worst_vehicle['Weibull_Score']:.2f}")
+        print(f"  使用强度 (反转后): {100-worst_vehicle['Usage_Score']:.2f} (原始: {worst_vehicle['Usage_Score']:.2f})")
+        print(f"  保养规范度: {worst_vehicle['Maint_Score']:.2f}")
+        print(f"  可靠性: {worst_vehicle['Reliability_Score']:.2f}")
+        print(f"  LLM 记录数: {int(worst_vehicle['LLM_Records'])}")
+
+        # 7.5 统计摘要
+        print("\n【综合得分统计】")
+        print(f"  平均分: {final_profiles_with_score['Final_Score'].mean():.2f}")
+        print(f"  中位数: {final_profiles_with_score['Final_Score'].median():.2f}")
+        print(f"  最高分: {final_profiles_with_score['Final_Score'].max():.2f}")
+        print(f"  最低分: {final_profiles_with_score['Final_Score'].min():.2f}")
+        print(f"  标准差: {final_profiles_with_score['Final_Score'].std():.2f}")
+
+        print("\n" + "="*80)
+        print("✓ PCA 组合赋权模型完成！")
         print("="*80 + "\n")
 
 

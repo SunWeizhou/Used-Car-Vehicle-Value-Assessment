@@ -72,13 +72,13 @@ class BehaviorModel:
 
         # 3. 按 VIN 聚合计算指标
         vehicle_stats = df_base.groupby('VIN').agg({
-            'REPAIR_MILEAGE': 'max',  # 最大里程
+            'REPAIR_MILEAGE': ['min', 'max'],  # 首次里程和最大里程
             'SETTLE_DATE': ['min', 'max'],  # 首次和最后出现日期
             'is_maintenance': 'sum'  # 保养次数
         }).reset_index()
 
         # 展平多级列名
-        vehicle_stats.columns = ['VIN', 'max_mileage', 'first_date', 'last_date', 'maint_count']
+        vehicle_stats.columns = ['VIN', 'min_mileage', 'max_mileage', 'first_date', 'last_date', 'maint_count']
 
         # 4. 计算使用天数 (span_days)
         vehicle_stats['span_days'] = (vehicle_stats['last_date'] - vehicle_stats['first_date']).dt.days
@@ -86,9 +86,12 @@ class BehaviorModel:
         # 过滤异常值：span_days 太小 (< 30天) 的车辆设为 30 天
         vehicle_stats.loc[vehicle_stats['span_days'] < 30, 'span_days'] = 30
 
-        # 5. 计算指标
-        # avg_daily_mileage = 总里程 / 使用天数
-        vehicle_stats['avg_daily_mileage'] = vehicle_stats['max_mileage'] / vehicle_stats['span_days']
+        # 5. 计算指标（修正版：使用里程增量）
+        # 里程增量 = 观测期内的里程增长
+        vehicle_stats['mileage_increase'] = vehicle_stats['max_mileage'] - vehicle_stats['min_mileage']
+
+        # avg_daily_mileage = 里程增量 / 使用天数（修正版）
+        vehicle_stats['avg_daily_mileage'] = vehicle_stats['mileage_increase'] / vehicle_stats['span_days']
 
         # maint_density = 保养次数 / 总里程 * 10000 (每万公里保养次数)
         vehicle_stats['maint_density'] = vehicle_stats['maint_count'] / vehicle_stats['max_mileage'] * 10000
@@ -108,28 +111,36 @@ class BehaviorModel:
         self.fitted = True
 
         # 保存统计信息（用于调试）
+        # 计算原始方法（max_mileage / span_days）用于对比
+        vehicle_stats['avg_daily_mileage_original'] = vehicle_stats['max_mileage'] / vehicle_stats['span_days']
+
         self.stats = {
             'n_vehicles': len(vehicle_stats),
             'avg_daily_mileage_mean': vehicle_stats['avg_daily_mileage'].mean(),
             'avg_daily_mileage_median': vehicle_stats['avg_daily_mileage'].median(),
+            'avg_daily_mileage_original_mean': vehicle_stats['avg_daily_mileage_original'].mean(),
+            'avg_daily_mileage_original_median': vehicle_stats['avg_daily_mileage_original'].median(),
             'maint_density_mean': vehicle_stats['maint_density'].mean(),
             'maint_density_median': vehicle_stats['maint_density'].median()
         }
 
         return self
 
-    def predict_scores(self, mileage: float, days: int, maint_count: int) -> Tuple[float, float]:
+    def predict_scores(self, mileage: float, days: int, maint_count: int, min_mileage: float = None) -> Tuple[float, float]:
         """
         预测行为得分
 
         Parameters:
         -----------
         mileage : float
-            总里程
+            总里程 (最大里程)
         days : int
             使用天数
         maint_count : int
             保养次数
+        min_mileage : float, optional
+            首次记录里程。如果提供，使用修正版计算 (里程增量法)；
+            如果不提供，回退到原始方法 (累积里程法)
 
         Returns:
         --------
@@ -142,7 +153,7 @@ class BehaviorModel:
             raise RuntimeError("模型尚未拟合，请先调用 fit() 方法")
 
         # 1. 计算指标
-        avg_daily_mileage, maint_density = self._compute_metrics(mileage, days, maint_count)
+        avg_daily_mileage, maint_density = self._compute_metrics(mileage, days, maint_count, min_mileage)
 
         # 2. 使用 ECDF 计算得分
         # 使用强度得分: 100 * (1 - F(日里程)) - 跑得越凶，得分越低
@@ -159,7 +170,8 @@ class BehaviorModel:
         self,
         mileage: float,
         days: int,
-        maint_count: int
+        maint_count: int,
+        min_mileage: float = None
     ) -> Tuple[float, float]:
         """
         计算行为指标
@@ -167,16 +179,18 @@ class BehaviorModel:
         Parameters:
         -----------
         mileage : float
-            总里程
+            最大里程 (总里程)
         days : int
             使用天数
         maint_count : int
             保养次数
+        min_mileage : float, optional
+            首次记录里程。如果提供，使用修正版计算 (里程增量法)
 
         Returns:
         --------
         avg_daily_mileage : float
-            平均日里程
+            平均日里程 (修正版: 观测期内里程增量 / 使用天数)
         maint_density : float
             保养密度 (每万公里保养次数)
         """
@@ -184,8 +198,14 @@ class BehaviorModel:
         if days < 30:
             days = 30
 
-        # avg_daily_mileage = 总里程 / 使用天数
-        avg_daily_mileage = mileage / days
+        # avg_daily_mileage 计算
+        if min_mileage is not None and min_mileage < mileage:
+            # 修正版: 使用里程增量
+            mileage_increase = mileage - min_mileage
+            avg_daily_mileage = mileage_increase / days
+        else:
+            # 原始版: 回退到累积里程法 (兼容旧接口)
+            avg_daily_mileage = mileage / days
 
         # maint_density = 保养次数 / 总里程 * 10000 (每万公里保养次数)
         maint_density = maint_count / mileage * 10000 if mileage > 0 else 0.0
