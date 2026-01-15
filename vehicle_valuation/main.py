@@ -232,38 +232,56 @@ def main():
 
     # 5. 可靠性模型 - 故障率强度评估
     print("\n" + "="*80)
-    print("步骤 5: 故障率强度模型")
+    print("步骤 5: 故障率强度模型 (基于 LLM 标注)")
     print("="*80)
 
-    # 5.1 拟合可靠性模型
-    print("\n【模型拟合】")
-    reliability_model = ReliabilityModel()
-    reliability_model.fit(df_base, df_llm=df_llm)
+    # 5.1 检查 LLM 结果
+    if df_llm is None:
+        print("\n⚠ 警告: 未找到 LLM 结果文件，跳过可靠性模型训练")
+        print("   提示: 运行 LLM 结构化处理生成 llm_parsed_results.csv")
+    else:
+        # 5.2 拟合可靠性模型
+        print("\n【模型拟合】")
+        reliability_model = ReliabilityModel()
+        reliability_model.fit(llm_df=df_llm, base_df=df_base)
 
-    # 5.2 显示统计信息
-    print(f"\n【数据统计】")
-    print(f"  车辆数量: {reliability_model.stats['n_vehicles']:,}")
-    print(f"  故障率强度 (Λ) - 均值: {reliability_model.stats['lambda_mean']:.6f} /km")
-    print(f"  故障率强度 (Λ) - 中位数: {reliability_model.stats['lambda_median']:.6f} /km")
-    print(f"  故障率强度 (Λ) - 最小值: {reliability_model.stats['lambda_min']:.6f} /km")
-    print(f"  故障率强度 (Λ) - 最大值: {reliability_model.stats['lambda_max']:.6f} /km")
-    print(f"  群体基准 (Λ_pop): {reliability_model.baseline_lambda:.6f} /km")
-    print(f"  平均总权重: {reliability_model.stats['total_weight_mean']:.2f}")
+        # 5.3 显示统计信息
+        print(f"\n【数据统计】")
+        print(f"  LLM 记录数: {reliability_model.stats['n_llm_records']:,}")
+        print(f"  覆盖车辆数: {reliability_model.stats['n_vehicles']:,}")
+        print(f"  平均每车记录数: {reliability_model.stats['avg_records_per_vehicle']:.2f}")
+        print(f"  故障率强度 (Λ) - 均值: {reliability_model.stats['lambda_mean']:.6f} /km")
+        print(f"  故障率强度 (Λ) - 中位数: {reliability_model.stats['lambda_median']:.6f} /km")
+        print(f"  故障率强度 (Λ) - 最小值: {reliability_model.stats['lambda_min']:.6f} /km")
+        print(f"  故障率强度 (Λ) - 最大值: {reliability_model.stats['lambda_max']:.6f} /km")
+        print(f"  群体基准 (Λ_pop): {reliability_model.lambda_pop:.6f} /km")
 
-    # 5.3 案例展示（沿用之前的 5 辆车）
-    print("\n【案例展示 - 同样的 5 辆车】")
-    for idx, row in sample_vins.iterrows():
-        vin = row['VIN']
+        # 5.4 案例展示（沿用之前的 5 辆车）
+        print("\n【案例展示 - 同样的 5 辆车】")
+        for idx, row in sample_vins.iterrows():
+            vin = row['VIN']
 
-        # 预测得分
-        reliability_score = reliability_model.predict_score(vin)
+            # 预测得分
+            reliability_score = reliability_model.predict_score(vin)
 
-        print(f"\n车辆 {vin[:8]}...")
-        print(f"  故障率强度得分: {reliability_score:.2f} / 100 (越高越可靠)")
+            if reliability_score is not None:
+                print(f"\n车辆 {vin[:8]}...")
+                print(f"  故障率强度得分: {reliability_score:.2f} / 100 (越高越可靠)")
 
-    print("\n" + "="*80)
-    print("✓ 故障率强度模型建模完成！")
-    print("="*80 + "\n")
+                # 显示详细数据
+                profile = reliability_model.get_vehicle_profile(vin)
+                if profile:
+                    print(f"  LLM 记录数: {profile['record_count']}")
+                    print(f"  总故障分数: {profile['total_fault_score']:.0f}")
+                    print(f"  最大里程: {profile['max_mileage']:,.0f} km")
+                    print(f"  故障率强度 Λ: {profile['lambda']:.6f} /km")
+            else:
+                print(f"\n车辆 {vin[:8]}...")
+                print(f"  ⚠ 该车辆不在 LLM 样本中，无法计算可靠性得分")
+
+        print("\n" + "="*80)
+        print("✓ 故障率强度模型建模完成！")
+        print("="*80 + "\n")
 
 
 if __name__ == "__main__":
