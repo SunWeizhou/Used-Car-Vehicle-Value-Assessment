@@ -14,7 +14,7 @@ project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
 from utils.preprocessing import load_and_clean_data
-from utils.llm_structuring import process_sample_batch
+from utils.llm_structuring import process_sample_batch_concurrent
 import os
 from pathlib import Path
 
@@ -53,17 +53,32 @@ def main():
             print("\n测试已取消")
             return
 
-    # 3. 处理 10 条样本
+    # 3. 处理全部数据（并发版本）
+    total_records = len(df_base)
     print("\n" + "="*80)
-    print("步骤 2: 处理 10 条样本（带工时辅助判定）")
+    print(f"步骤 2: 并发处理全部数据（共 {total_records:,} 条记录）")
     print("="*80 + "\n")
 
-    results_df = process_sample_batch(
+    # 并发配置（已优化：降低并发数，增加重试机制）
+    max_workers = 5  # 并发线程数，降低以避免 API 速率限制
+    print(f"⚠️  并发配置: {max_workers} 个线程（已优化以避免 API 限制）")
+    print(f"预计速度: 约 {max_workers * 0.5} 条/秒（带重试机制）")
+    print(f"预计耗时: 约 {total_records / (max_workers * 0.5) / 60:.1f} 分钟\n")
+
+    # 询问确认
+    confirm = input("是否继续？(输入 'yes' 确认): ").strip()
+
+    if confirm.lower() != 'yes':
+        print("\n处理已取消")
+        return
+
+    results_df = process_sample_batch_concurrent(
         base_df=df_base,
         parts_df=df_parts,
         time_df=df_time,
         api_key=api_key,
-        sample_size=10  # 只处理 10 条
+        sample_size=total_records,  # 处理全部数据
+        max_workers=max_workers  # 并发线程数
     )
 
     # 4. 展示详细结果

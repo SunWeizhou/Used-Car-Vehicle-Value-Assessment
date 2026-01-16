@@ -1,0 +1,51 @@
+# 敏感配置文件
+.env
+*.env
+
+# Python 缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 虚拟环境
+venv/
+env/
+ENV/
+
+# IDE 配置
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 数据文件 (太大，不应提交到 Git)
+*.csv
+*.xlsx
+*.xls
+!*.csv.example
+
+# 输出文件
+*.txt
+*.log
+*.output
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Claude 项目文件
+.claude/
+.claude-*
+
+# 临时文件
+*.tmp
+*.bak
+*.swp
