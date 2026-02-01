@@ -1,0 +1,31 @@
+{
+  "model": {
+    "model_path": "./output/models/transformer_failure_predictor.pth",
+    "temporal_feature_dim": 8,
+    "num_systems": 20,
+    "d_model": 256,
+    "nhead": 8,
+    "num_layers": 6,
+    "dropout": 0.1
+  },
+  "prediction": {
+    "horizons": [7, 30, 90],
+    "batch_size": 32,
+    "device": "auto",
+    "risk_thresholds": {
+      "low": 0.1,
+      "medium": 0.3,
+      "high": 0.6
+    }
+  },
+  "output": {
+    "save_dir": "./output",
+    "save_predictions": true,
+    "save_plots": true,
+    "save_report": true
+  },
+  "logging": {
+    "log_level": "INFO",
+    "log_dir": "./output/logs"
+  }
+}

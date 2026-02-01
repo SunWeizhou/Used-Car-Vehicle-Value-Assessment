@@ -1,0 +1,51 @@
+{
+  "data": {
+    "path": "data/vehicle_timeline.csv",
+    "window_size": 6,
+    "stride": 3,
+    "prediction_horizons": [7, 30, 90],
+    "train_split": 0.8,
+    "val_split": 0.2,
+    "random_state": 42,
+    "augmentation": {
+      "enabled": true,
+      "noise_level": 0.01,
+      "noise_types": ["gaussian", "uniform"],
+      "window_sizes": [5, 6, 7],
+      "strides": [2, 3, 4],
+      "augmentation_factor": 2
+    }
+  },
+  "model": {
+    "temporal_feature_dim": 8,
+    "num_systems": 20,
+    "d_model": 512,
+    "nhead": 8,
+    "num_layers": 8,
+    "dropout": 0.15,
+    "max_sequence_length": 50
+  },
+  "training": {
+    "batch_size": 32,
+    "num_workers": 0,
+    "epochs": 100,
+    "patience": 15,
+    "learning_rate": 0.00005,
+    "weight_decay": 0.005,
+    "device": "cpu",
+    "gradient_clip_norm": 1.0,
+    "save_best_only": true
+  },
+  "output": {
+    "save_dir": "./output",
+    "save_best_model": true,
+    "save_history": true,
+    "evaluation_metrics": ["loss", "accuracy", "precision", "recall", "f1"]
+  },
+  "logging": {
+    "log_level": "INFO",
+    "log_dir": "./logs",
+    "tensorboard": false,
+    "save_plots": true
+  }
+}

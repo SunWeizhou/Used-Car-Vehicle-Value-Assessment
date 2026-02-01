@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-二手车残值评估系统 - 主入口
+二手车残值评估系统 - 增强版（集成Transformer故障预测）
 
 功能:
 - 数据加载与预处理
 - 车辆生命周期分析
 - 使用强度与保养规范度评估
 - 故障率建模
+- Transformer故障预测
 - 未来风险预测
+- 维护建议生成
 """
 
 import sys
 from pathlib import Path
+import pandas as pd
+import numpy as np
+from typing import Dict, List
 
 # 添加项目根目录到 Python 路径
 project_root = Path(__file__).parent
@@ -23,14 +28,244 @@ from models.lifecycle import prepare_weibull_data, WeibullModel
 from models.behavior import BehaviorModel
 from models.reliability import ReliabilityModel
 from models.weighting import PCAWeightingModel
-import numpy as np
-import pandas as pd
+from models.transformer_predictor import FailurePredictorService
+import torch
 
+def load_transformer_predictor(config: Dict, model_path: str = None) -> FailurePredictorService:
+    """加载Transformer预测模型"""
+    try:
+        # 如果没有指定模型路径，尝试使用默认路径
+        if model_path is None:
+            model_path = project_root / "output" / "models" / "transformer_failure_predictor.pth"
 
-def main():
+        predictor = FailurePredictorService(str(model_path) if model_path.exists() else None)
+        print(f"✓ Transformer预测模型加载成功")
+        print(f"  设备: {predictor.device}")
+        print(f"  模型大小: {predictor.get_model_summary()['model_size_mb']:.1f} MB")
+        return predictor
+    except Exception as e:
+        print(f"⚠ Transformer模型加载失败: {e}")
+        print("  将跳过故障预测功能")
+        return None
+
+def run_transformer_prediction(
+    predictor: FailurePredictorService,
+    df_llm: pd.DataFrame,
+    df_base: pd.DataFrame,
+    sample_vins: List[str] = None,
+    top_n: int = 10
+) -> Dict:
+    """运行Transformer故障预测"""
+    if predictor is None:
+        return None
+
+    print(f"\n" + "="*80)
+    print("步骤 8: Transformer故障预测")
+    print("="*80)
+
+    # 准备时间线数据
+    print("\n【准备时序数据】")
+    df_timeline = prepare_timeline_data(df_llm, df_base)
+    print(f"  时间线数据: {len(df_timeline)} 条记录")
+
+    # 确定预测的VIN列表
+    if sample_vins is None:
+        # 使用LLM处理过的VIN
+        prediction_vins = df_llm['VIN'].unique().tolist()
+    else:
+        # 使用指定的VIN样本
+        prediction_vins = [vin for vin in sample_vins if vin in df_llm['VIN'].values]
+
+    print(f"  预测车辆数量: {len(prediction_vins)}")
+
+    # 执行批量预测
+    print(f"\n【开始批量预测】")
+    batch_results = []
+
+    # 分批处理以避免内存问题
+    batch_size = 50
+    for i in range(0, len(prediction_vins), batch_size):
+        batch_vins = prediction_vins[i:i+batch_size]
+        print(f"  处理批次 {i//batch_size + 1}: {len(batch_vins)} 辆车")
+
+        batch_results_batch = []
+        for vin in batch_vins:
+            vin_data = df_timeline[df_timeline['VIN'] == vin]
+
+            if len(vin_data) > 0:
+                try:
+                    # 预测故障风险
+                    risk_predictions = predictor.predict_failure_risk(vin_data)
+
+                    # 生成维护建议
+                    recommendations = predictor.generate_maintenance_recommendations(
+                        risk_predictions, vin_data
+                    )
+
+                    batch_results_batch.append({
+                        'vin': vin,
+                        'risk_predictions': risk_predictions,
+                        'recommendations': recommendations,
+                        'statistics': calculate_vehicle_statistics(vin_data)
+                    })
+                except Exception as e:
+                    print(f"    ⚠ VIN {vin[:8]}... 预测失败: {e}")
+
+        batch_results.extend(batch_results_batch)
+
+    print(f"  ✓ 成功预测 {len(batch_results)} 辆车")
+
+    # 保存预测结果
+    if batch_results:
+        df_predictions = save_prediction_results(batch_results, top_n)
+
+        # 显示预测统计
+        print_prediction_statistics(batch_results, df_predictions)
+
+        return {
+            'results': batch_results,
+            'df_predictions': df_predictions,
+            'summary': generate_prediction_summary(batch_results)
+        }
+
+    return None
+
+def prepare_timeline_data(df_llm: pd.DataFrame, df_base: pd.DataFrame) -> pd.DataFrame:
+    """准备时间线数据"""
+    # 合并LLM结果和基础数据
+    df_timeline = df_base.merge(
+        df_llm[['ID', 'Event_Type', 'System', 'Severity', 'Reasoning']],
+        on='ID',
+        how='left'
+    )
+
+    # 确保日期列是datetime类型
+    df_timeline['SETTLE_DATE'] = pd.to_datetime(df_timeline['SETTLE_DATE'])
+
+    # 排序
+    df_timeline = df_timeline.sort_values(['VIN', 'SETTLE_DATE'])
+
+    return df_timeline
+
+def calculate_vehicle_statistics(vin_data: pd.DataFrame) -> Dict:
+    """计算车辆统计信息"""
+    return {
+        'total_records': len(vin_data),
+        'mileage_range': {
+            'min': vin_data['REPAIR_MILEAGE'].min(),
+            'max': vin_data['REPAIR_MILEAGE'].max(),
+            'span': vin_data['REPAIR_MILEAGE'].max() - vin_data['REPAIR_MILEAGE'].min()
+        },
+        'time_span': (vin_data['SETTLE_DATE'].max() - vin_data['SETTLE_DATE'].min()).days,
+        'severity_distribution': vin_data['Severity'].value_counts().to_dict(),
+        'system_distribution': vin_data['System'].value_counts().to_dict()
+    }
+
+def save_prediction_results(results: List[Dict], top_n: int) -> pd.DataFrame:
+    """保存预测结果"""
+    # 转换为DataFrame
+    records = []
+    for result in results:
+        row = {
+            'VIN': result['vin'],
+            'risk_7d': result['risk_predictions'].get(7, 0),
+            'risk_30d': result['risk_predictions'].get(30, 0),
+            'risk_90d': result['risk_predictions'].get(90, 0),
+            'last_mileage': result['statistics']['mileage_range']['max'],
+            'total_records': result['statistics']['total_records'],
+            'time_span_days': result['statistics']['time_span'],
+            'severity_L3': result['statistics']['severity_distribution'].get('L3', 0),
+            'severity_L2': result['statistics']['severity_distribution'].get('L2', 0),
+            'severity_L1': result['statistics']['severity_distribution'].get('L1', 0),
+            'severity_L0': result['statistics']['severity_distribution'].get('L0', 0)
+        }
+        records.append(row)
+
+    df_predictions = pd.DataFrame(records)
+
+    # 保存到CSV
+    predictions_path = project_root / "data" / "transformer_predictions.csv"
+    df_predictions.to_csv(predictions_path, index=False)
+    print(f"  ✓ 预测结果已保存至: {predictions_path}")
+
+    return df_predictions
+
+def print_prediction_statistics(results: List[Dict], df_predictions: pd.DataFrame):
+    """打印预测统计信息"""
+    print(f"\n【预测统计】")
+    print(f"  平均7天风险: {df_predictions['risk_7d'].mean():.1%}")
+    print(f"  平均30天风险: {df_predictions['risk_30d'].mean():.1%}")
+    print(f"  平均90天风险: {df_predictions['risk_90d'].mean():.1%}")
+
+    # 风险等级分布
+    risk_levels = {
+        '低风险 (< 10%)': (df_predictions['risk_30d'] < 0.1).sum(),
+        '中等风险 (10%-30%)': ((df_predictions['risk_30d'] >= 0.1) & (df_predictions['risk_30d'] < 0.3)).sum(),
+        '高风险 (30%-60%)': ((df_predictions['risk_30d'] >= 0.3) & (df_predictions['risk_30d'] < 0.6)).sum(),
+        '极高风险 (> 60%)': (df_predictions['risk_30d'] >= 0.6).sum()
+    }
+
+    print(f"\n【风险等级分布】")
+    for level, count in risk_levels.items():
+        print(f"  {level}: {count} 辆车 ({count/len(df_predictions)*100:.1f}%)")
+
+    # 显示高风险车辆
+    high_risk_vehicles = df_predictions[df_predictions['risk_30d'] >= 0.6].nlargest(5, 'risk_30d')
+    if len(high_risk_vehicles) > 0:
+        print(f"\n【极高风险车辆前5名】")
+        for _, row in high_risk_vehicles.iterrows():
+            print(f"  VIN: {row['VIN'][:10]}... - 30天风险: {row['risk_30d']:.1%}")
+
+def generate_prediction_summary(results: List[Dict]) -> Dict:
+    """生成预测摘要"""
+    summary = {
+        'total_vehicles': len(results),
+        'average_risks': {
+            '7d': np.mean([r['risk_predictions'].get(7, 0) for r in results]),
+            '30d': np.mean([r['risk_predictions'].get(30, 0) for r in results]),
+            '90d': np.mean([r['risk_predictions'].get(90, 0) for r in results])
+        },
+        'high_risk_vehicles': len([r for r in results if r['risk_predictions'].get(30, 0) >= 0.6]),
+        'critical_vehicles': len([r for r in results if r['risk_predictions'].get(90, 0) >= 0.8]),
+        'recommendations': {}
+    }
+
+    # 统计常见建议类型
+    for result in results:
+        for rec in result['recommendations']:
+            if '检查' in rec:
+                summary['recommendations']['检查'] = summary['recommendations'].get('检查', 0) + 1
+            if '建议' in rec:
+                summary['recommendations']['建议'] = summary['recommendations'].get('建议', 0) + 1
+            if '保养' in rec:
+                summary['recommendations']['保养'] = summary['recommendations'].get('保养', 0) + 1
+
+    return summary
+
+def print_enhanced_analysis(final_profiles_with_score, transformer_results: Dict = None):
+    """打印增强分析结果"""
+    print("\n" + "="*80)
+    print("增强分析结果")
+    print("="*80)
+
+    if transformer_results:
+        summary = transformer_results['summary']
+        print(f"\n【Transformer预测摘要】")
+        print(f"  预测车辆数: {summary['total_vehicles']}")
+        print(f"  平均风险 - 7天: {summary['average_risks']['7d']:.1%}")
+        print(f"  平均风险 - 30天: {summary['average_risks']['30d']:.1%}")
+        print(f"  平均风险 - 90天: {summary['average_risks']['90d']:.1%}")
+        print(f"  高风险车辆: {summary['high_risk_vehicles']} 辆")
+        print(f"  极高风险车辆: {summary['critical_vehicles']} 辆")
+
+        print(f"\n【维护建议统计】")
+        for rec_type, count in summary['recommendations'].items():
+            print(f"  {rec_type}: {count} 条建议")
+
+def main(use_transformer: bool = True, transformer_model_path: str = None):
     """主函数"""
     print("\n" + "="*80)
-    print("二手车残值评估系统")
+    print("二手车残值评估系统 - 增强版")
     print("="*80 + "\n")
 
     # 1. 加载和清洗数据
@@ -371,23 +606,14 @@ def main():
         print("✓ 车辆档案整合完成！")
         print("="*80 + "\n")
 
-        # 6.7 保存车辆画像表（包含评分）
-        vehicle_profiles_path = "data/vehicle_profiles_with_scores.csv"
-        final_vehicle_profiles.to_csv(vehicle_profiles_path, index=False, encoding='utf-8')
-        print(f"📁 车辆画像表已保存到: {vehicle_profiles_path}")
-
         # 7. PCA 组合赋权模型 (第 4 章)
         print("\n" + "="*80)
         print("步骤 7: PCA 组合赋权模型")
         print("="*80)
 
-        # 7.1 拟合 PCA 权重模型（支持Transformer集成）
+        # 7.1 拟合 PCA 权重模型
         print("\n【权重计算】")
-        # 创建PCA模型，默认启用Transformer集成
-        weighting_model = PCAWeightingModel(
-            use_transformer=True,
-            model_path="output/models/transformer_failure_predictor_enhanced_v2_best.pth"
-        )
+        weighting_model = PCAWeightingModel()
         weighting_model.fit(final_vehicle_profiles)
 
         # 7.2 计算最终得分
@@ -397,20 +623,8 @@ def main():
         # 7.3 展示最终得分表 (前 10 名)
         print("\n【最终车辆画像表 - 前 10 名】")
         top_10 = final_profiles_with_score.nlargest(10, 'Final_Score')
-
-        # 添加评分维度说明列
-        if 'Scoring_Dimensions' in top_10.columns:
-            print("\n" + "="*120)
-            print(f"{'排名':<4} {'VIN':<20} {'最终得分':<10} {'生命周期':<10} {'使用强度':<10} {'保养规范度':<12} {'可靠性':<10} {'评分维度':<10}")
-            print("-"*120)
-            for idx, (_, row) in enumerate(top_10.iterrows(), 1):
-                print(f"{idx:<4} {row['VIN']:<20} {row['Final_Score']:<10.2f} "
-                      f"{row['Weibull_Score']:<10.2f} {row['Usage_Score']:<10.2f} "
-                      f"{row['Maint_Score']:<12.2f} {row['Reliability_Score']:<10.2f} "
-                      f"{row['Scoring_Dimensions']:<10}")
-        else:
-            print("\n" + "="*100)
-            print(top_10.to_string(index=False))
+        print("\n" + "="*100)
+        print(top_10.to_string(index=False))
         print("="*100 + "\n")
 
         # 7.4 展示车况最好和最差的车
@@ -425,16 +639,7 @@ def main():
         print(f"  使用强度 (反转后): {100-best_vehicle['Usage_Score']:.2f} (原始: {best_vehicle['Usage_Score']:.2f})")
         print(f"  保养规范度: {best_vehicle['Maint_Score']:.2f}")
         print(f"  可靠性: {best_vehicle['Reliability_Score']:.2f}")
-        if 'Transformer_Reliability_Score' in best_vehicle:
-            print(f"  Transformer预测可靠性: {best_vehicle['Transformer_Reliability_Score']:.2f}")
         print(f"  LLM 记录数: {int(best_vehicle['LLM_Records'])}")
-        if 'Scoring_Dimensions' in best_vehicle:
-            print(f"  评分维度: {best_vehicle['Scoring_Dimensions']} {'(含Transformer预测)' if best_vehicle['Scoring_Dimensions'] == '5维' else ''}")
-
-        # 7.5 保存最终评分结果
-        final_scores_path = "data/final_vehicle_scores.csv"
-        final_profiles_with_score.to_csv(final_scores_path, index=False, encoding='utf-8')
-        print(f"\n📁 最终评分结果已保存到: {final_scores_path}")
 
         print("\n⚠ 车况最差的车:")
         print(f"  VIN: {worst_vehicle['VIN']}")
@@ -443,11 +648,7 @@ def main():
         print(f"  使用强度 (反转后): {100-worst_vehicle['Usage_Score']:.2f} (原始: {worst_vehicle['Usage_Score']:.2f})")
         print(f"  保养规范度: {worst_vehicle['Maint_Score']:.2f}")
         print(f"  可靠性: {worst_vehicle['Reliability_Score']:.2f}")
-        if 'Transformer_Reliability_Score' in worst_vehicle:
-            print(f"  Transformer预测可靠性: {worst_vehicle['Transformer_Reliability_Score']:.2f}")
         print(f"  LLM 记录数: {int(worst_vehicle['LLM_Records'])}")
-        if 'Scoring_Dimensions' in worst_vehicle:
-            print(f"  评分维度: {worst_vehicle['Scoring_Dimensions']} {'(含Transformer预测)' if worst_vehicle['Scoring_Dimensions'] == '5维' else ''}")
 
         # 7.5 统计摘要
         print("\n【综合得分统计】")
@@ -457,18 +658,43 @@ def main():
         print(f"  最低分: {final_profiles_with_score['Final_Score'].min():.2f}")
         print(f"  标准差: {final_profiles_with_score['Final_Score'].std():.2f}")
 
-        # 显示评分维度统计
-        if 'Scoring_Dimensions' in final_profiles_with_score.columns:
-            dimension_counts = final_profiles_with_score['Scoring_Dimensions'].value_counts()
-            print(f"\n【评分维度统计】")
-            for dim, count in dimension_counts.items():
-                pct = count / len(final_profiles_with_score) * 100
-                print(f"  {dim}评分: {count} 辆车 ({pct:.1f}%)")
-
         print("\n" + "="*80)
-        print("✓ PCA 组合赋权模型完成！（含Transformer集成）")
+        print("✓ PCA 组合赋权模型完成！")
         print("="*80 + "\n")
 
+        # 8. Transformer故障预测（可选）
+        transformer_results = None
+        if use_transformer and df_llm is not None:
+            transformer_predictor = load_transformer_predictor({}, transformer_model_path)
+            if transformer_predictor is not None:
+                transformer_results = run_transformer_prediction(
+                    transformer_predictor,
+                    df_llm,
+                    df_base,
+                    sample_vins=sample_vins['VIN'].tolist(),
+                    top_n=10
+                )
+
+        # 9. 增强分析结果
+        if transformer_results:
+            print_enhanced_analysis(final_profiles_with_score, transformer_results)
+
+        print("\n" + "="*80)
+        print("✓ 所有分析完成！")
+        print("="*80 + "\n")
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(description='增强版二手车残值评估系统')
+    parser.add_argument('--no-transformer', action='store_true',
+                       help='不使用Transformer故障预测')
+    parser.add_argument('--transformer-model', type=str,
+                       help='Transformer模型路径')
+
+    args = parser.parse_args()
+
+    main(
+        use_transformer=not args.no_transformer,
+        transformer_model_path=args.transformer_model
+    )
