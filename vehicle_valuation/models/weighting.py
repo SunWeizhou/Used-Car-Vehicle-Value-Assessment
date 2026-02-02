@@ -34,6 +34,14 @@ except ImportError:
     TRANSFORMER_AVAILABLE = False
     print("  ⚠️  Transformer模块未找到，将使用4维评分（不包含故障预测）")
 
+# 导入贝叶斯可靠性模型
+try:
+    from bayesian_reliability import BayesianReliabilityModel
+    BAYESIAN_AVAILABLE = True
+except ImportError:
+    BAYESIAN_AVAILABLE = False
+    print("  ⚠️  贝叶斯可靠性模块未找到，将使用传统可靠性评分")
+
 
 class PCAWeightingModel:
     """
@@ -44,7 +52,12 @@ class PCAWeightingModel:
     并计算最终的综合得分。
     """
 
-    def __init__(self, use_transformer: bool = True, model_path: Optional[str] = None):
+    def __init__(self,
+               use_transformer: bool = True,
+               model_path: Optional[str] = None,
+               use_bayesian: bool = True,
+               alpha: float = 0.6,
+               penalty_factor: float = 0.95):
         """
         初始化模型
 
@@ -54,6 +67,12 @@ class PCAWeightingModel:
             是否使用Transformer预测结果
         model_path : str, optional
             Transformer模型路径
+        use_bayesian : bool
+            是否使用贝叶斯更新可靠性模型
+        alpha : float
+            贝叶斯更新的历史权重（默认0.6）
+        penalty_factor : float
+            不确定性惩罚因子（默认0.95）
         """
         self.scaler = StandardScaler()
         self.pca = PCA()
@@ -63,6 +82,10 @@ class PCAWeightingModel:
         self.use_transformer = use_transformer and TRANSFORMER_AVAILABLE
         self.transformer_service = None
         self.model_path = model_path
+        self.use_bayesian = use_bayesian and BAYESIAN_AVAILABLE
+        self.bayesian_model = None
+        self.alpha = alpha
+        self.penalty_factor = penalty_factor
 
         # 设置日志
         logging.basicConfig(level=logging.INFO)
@@ -94,11 +117,57 @@ class PCAWeightingModel:
         --------
         self : PCAWeightingModel
         """
-        # 1. 初始化Transformer预测服务（如果启用）
-        if self.use_transformer:
-            self._init_transformer_service()
+        # 1. 初始化贝叶斯可靠性模型（如果启用）
+        if self.use_bayesian:
+            print("\n【贝叶斯可靠性模型初始化】")
+            self.bayesian_model = BayesianReliabilityModel(
+                alpha=self.alpha,
+                penalty_factor=self.penalty_factor
+            )
 
-        # 2. 提取基础特征列
+        # 2. 准备训练数据（需要LLM数据和基础数据）
+        llm_df = None
+        base_df = None
+        transformer_predictions = {}
+
+        # 尝试加载数据
+        try:
+            # 加载LLM数据
+            llm_path = "data/llm_parsed_results.csv"
+            if os.path.exists(llm_path):
+                llm_df = pd.read_csv(llm_path)
+                print(f"  ✓ 加载LLM数据: {len(llm_df)} 条记录")
+
+            # 加载基础数据
+            base_path = "data/上汽跃进_燃油_baseinfo.csv"
+            if os.path.exists(base_path):
+                base_df = pd.read_csv(base_path)
+                print(f"  ✓ 加载基础数据: {len(base_df)} 条记录")
+        except Exception as e:
+            print(f"  ⚠ 数据加载失败: {e}")
+
+        # 3. 训练贝叶斯可靠性模型（如果有数据）
+        if self.bayesian_model and llm_df is not None and base_df is not None:
+            try:
+                # 如果使用Transformer，获取预测结果
+                if self.use_transformer:
+                    print("  → 获取Transformer预测结果...")
+                    transformer_scores = self._get_transformer_predictions(df_profiles)
+                    if transformer_scores is not None:
+                        # 创建预测字典
+                        for idx, (_, row) in enumerate(df_profiles.iterrows()):
+                            vin = row['VIN']
+                            risk_90d = transformer_scores[idx] / 100.0  # 转换为概率
+                            transformer_predictions[vin] = {'risk_90d': risk_90d}
+
+                # 训练贝叶斯模型
+                self.bayesian_model.fit(llm_df, base_df, transformer_predictions)
+                print("  ✓ 贝叶斯可靠性模型训练完成")
+            except Exception as e:
+                print(f"  ⚠ 贝叶斯模型训练失败: {e}")
+                self.use_bayesian = False
+
+        # 4. 提取基础特征列
         base_feature_names = ['Weibull_Score', 'Usage_Score', 'Maint_Score', 'Reliability_Score']
 
         # 检查基础列是否存在
@@ -106,7 +175,7 @@ class PCAWeightingModel:
         if missing_cols:
             raise ValueError(f"DataFrame 缺少必要的列: {missing_cols}")
 
-        # 3. 处理基础数据
+        # 5. 处理基础数据
         X = df_profiles[base_feature_names].copy()
 
         # 对于 Reliability_Score 的缺失值,用平均值填充
@@ -120,20 +189,52 @@ class PCAWeightingModel:
         # 保存原始数据用于后续计算
         self.X_raw = X.values
 
-        # 4. 如果使用Transformer，添加故障预测维度
-        if self.use_transformer:
+        # 6. 如果使用贝叶斯可靠性，替换传统可靠性得分
+        if self.use_bayesian and self.bayesian_model:
+            print("\n【应用贝叶斯可靠性更新】")
+            hybrid_scores = []
+            bayesian_details = []
+
+            for _, row in df_profiles.iterrows():
+                vin = row['VIN']
+
+                # 获取NHPP历史得分
+                nhpp_score = row['Reliability_Score']
+
+                # 计算混合可靠性得分
+                hybrid_score = self.bayesian_model.calculate_hybrid_reliability(vin, nhpp_score)
+                breakdown = self.bayesian_model.get_reliability_breakdown(vin, nhpp_score)
+
+                hybrid_scores.append(hybrid_score)
+                bayesian_details.append(breakdown)
+
+            # 替换传统可靠性得分
+            X['Reliability_Score'] = hybrid_scores
+            self.bayesian_details = bayesian_details
+            print(f"  ✓ 应用贝叶斯更新: {len([d for d in bayesian_details if d['scoring_type'] == 'bayesian_update'])} 辆车使用贝叶斯更新")
+            print(f"  ✓ 应用不确定性惩罚: {len([d for d in bayesian_details if d['scoring_type'] == 'uncertainty_penalty'])} 辆车使用不确定性惩罚")
+
+            # 特征名称保持不变，仍然是4维
+            self.feature_names = base_feature_names
+            self.scoring_method = "bayesian_reliability"
+            print(f"  ✓ 使用贝叶斯更新的4维评分系统")
+
+        # 7. 如果不使用贝叶斯但使用Transformer，添加Transformer预测维度
+        elif self.use_transformer:
+            print("\n【传统Transformer集成】")
             transformer_scores = self._get_transformer_predictions(df_profiles)
             if transformer_scores is not None and len(transformer_scores) > 0:
                 # 将Transformer预测结果添加到特征矩阵中
-                # 注意：Transformer预测的是风险分数（越高风险越高），我们需要转换成可靠性分数
                 reliability_score_from_transformer = 100.0 - np.array(transformer_scores)
                 X['Transformer_Reliability_Score'] = reliability_score_from_transformer
                 self.feature_names = ['Weibull_Score', 'Usage_Score', 'Maint_Score', 'Reliability_Score', 'Transformer_Reliability_Score']
+                self.scoring_method = "traditional_transformer"
                 print(f"  ✓ 成功集成Transformer预测，使用5维评分系统")
             else:
                 print(f"  ⚠ Transformer预测失败，回退到4维评分系统")
                 self.feature_names = base_feature_names
                 self.use_transformer = False
+                self.scoring_method = "traditional"
         else:
             self.feature_names = base_feature_names
 
@@ -371,8 +472,36 @@ class PCAWeightingModel:
         result_df['Final_Score'] = final_scores
 
         # 添加评分维度说明
-        dimension_text = "5维" if self.use_transformer else "4维"
+        if hasattr(self, 'scoring_method'):
+            if self.scoring_method == "bayesian_reliability":
+                dimension_text = "贝叶斯4维"
+            elif self.scoring_method == "traditional_transformer":
+                dimension_text = "传统5维"
+            else:
+                dimension_text = "5维" if self.use_transformer else "4维"
+        else:
+            dimension_text = "5维" if self.use_transformer else "4维"
+
         result_df['Scoring_Dimensions'] = dimension_text
+
+        # 添加贝叶斯可靠性详情
+        if hasattr(self, 'bayesian_details'):
+            print("\n【贝叶斯可靠性详情】")
+            bayesian_upgraded = sum(1 for d in self.bayesian_details if d['scoring_type'] == 'bayesian_update')
+            bayesian_penalized = sum(1 for d in self.bayesian_details if d['scoring_type'] == 'uncertainty_penalty')
+
+            print(f"  - 贝叶斯更新车辆: {bayesian_upgraded} 辆")
+            print(f"  - 不确定性惩罚车辆: {bayesian_penalized} 辆")
+
+            # 可选：保存详细贝叶斯信息
+            bayesian_info = []
+            for detail in self.bayesian_details:
+                bayesian_info.append({
+                    'bayesian_history_score': detail['history_score'],
+                    'bayesian_future_score': detail['future_score'],
+                    'bayesian_scoring_type': detail['scoring_type']
+                })
+            result_df = pd.concat([result_df, pd.DataFrame(bayesian_info)], axis=1)
 
         return result_df
 

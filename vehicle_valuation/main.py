@@ -381,11 +381,14 @@ def main():
         print("步骤 7: PCA 组合赋权模型")
         print("="*80)
 
-        # 7.1 拟合 PCA 权重模型（支持Transformer集成）
+        # 7.1 拟合 PCA 权重模型（启用贝叶斯可靠性更新）
         print("\n【权重计算】")
-        # 创建PCA模型，默认启用Transformer集成
+        # 创建PCA模型，启用贝叶斯可靠性更新（推荐）
         weighting_model = PCAWeightingModel(
-            use_transformer=True,
+            use_transformer=True,  # 可选：同时获取Transformer预测
+            use_bayesian=True,     # 启用贝叶斯更新
+            alpha=0.6,             # 历史权重60%
+            penalty_factor=0.95,   # 不确定性惩罚因子
             model_path="output/models/transformer_failure_predictor_enhanced_v2_best.pth"
         )
         weighting_model.fit(final_vehicle_profiles)
@@ -424,12 +427,26 @@ def main():
         print(f"  生命周期: {best_vehicle['Weibull_Score']:.2f}")
         print(f"  使用强度 (反转后): {100-best_vehicle['Usage_Score']:.2f} (原始: {best_vehicle['Usage_Score']:.2f})")
         print(f"  保养规范度: {best_vehicle['Maint_Score']:.2f}")
-        print(f"  可靠性: {best_vehicle['Reliability_Score']:.2f}")
+
+        # 显示可靠性得分（支持贝叶斯更新）
+        if 'bayesian_history_score' in best_vehicle and best_vehicle['bayesian_history_score'] != best_vehicle['Reliability_Score']:
+            # 使用贝叶斯更新
+            print(f"  可靠性 (历史): {best_vehicle['bayesian_history_score']:.2f}")
+            if best_vehicle['bayesian_future_score'] is not None:
+                print(f"  可靠性 (未来预测): {best_vehicle['bayesian_future_score']:.2f}")
+            print(f"  最终可靠性 (贝叶斯融合): {best_vehicle['Reliability_Score']:.2f}")
+        else:
+            print(f"  可靠性: {best_vehicle['Reliability_Score']:.2f}")
+
         if 'Transformer_Reliability_Score' in best_vehicle:
             print(f"  Transformer预测可靠性: {best_vehicle['Transformer_Reliability_Score']:.2f}")
         print(f"  LLM 记录数: {int(best_vehicle['LLM_Records'])}")
         if 'Scoring_Dimensions' in best_vehicle:
-            print(f"  评分维度: {best_vehicle['Scoring_Dimensions']} {'(含Transformer预测)' if best_vehicle['Scoring_Dimensions'] == '5维' else ''}")
+            dim_text = best_vehicle['Scoring_Dimensions']
+            if '贝叶斯' in dim_text:
+                print(f"  评分维度: {dim_text} (含贝叶斯更新)")
+            elif '5维' in dim_text:
+                print(f"  评分维度: {dim_text} (含Transformer预测)")
 
         # 7.5 保存最终评分结果
         final_scores_path = "data/final_vehicle_scores.csv"
@@ -442,12 +459,26 @@ def main():
         print(f"  生命周期: {worst_vehicle['Weibull_Score']:.2f}")
         print(f"  使用强度 (反转后): {100-worst_vehicle['Usage_Score']:.2f} (原始: {worst_vehicle['Usage_Score']:.2f})")
         print(f"  保养规范度: {worst_vehicle['Maint_Score']:.2f}")
-        print(f"  可靠性: {worst_vehicle['Reliability_Score']:.2f}")
+
+        # 显示可靠性得分（支持贝叶斯更新）
+        if 'bayesian_history_score' in worst_vehicle and worst_vehicle['bayesian_history_score'] != worst_vehicle['Reliability_Score']:
+            # 使用贝叶斯更新
+            print(f"  可靠性 (历史): {worst_vehicle['bayesian_history_score']:.2f}")
+            if worst_vehicle['bayesian_future_score'] is not None:
+                print(f"  可靠性 (未来预测): {worst_vehicle['bayesian_future_score']:.2f}")
+            print(f"  最终可靠性 (贝叶斯融合): {worst_vehicle['Reliability_Score']:.2f}")
+        else:
+            print(f"  可靠性: {worst_vehicle['Reliability_Score']:.2f}")
+
         if 'Transformer_Reliability_Score' in worst_vehicle:
             print(f"  Transformer预测可靠性: {worst_vehicle['Transformer_Reliability_Score']:.2f}")
         print(f"  LLM 记录数: {int(worst_vehicle['LLM_Records'])}")
         if 'Scoring_Dimensions' in worst_vehicle:
-            print(f"  评分维度: {worst_vehicle['Scoring_Dimensions']} {'(含Transformer预测)' if worst_vehicle['Scoring_Dimensions'] == '5维' else ''}")
+            dim_text = worst_vehicle['Scoring_Dimensions']
+            if '贝叶斯' in dim_text:
+                print(f"  评分维度: {dim_text} (含贝叶斯更新)")
+            elif '5维' in dim_text:
+                print(f"  评分维度: {dim_text} (含Transformer预测)")
 
         # 7.5 统计摘要
         print("\n【综合得分统计】")
@@ -465,8 +496,23 @@ def main():
                 pct = count / len(final_profiles_with_score) * 100
                 print(f"  {dim}评分: {count} 辆车 ({pct:.1f}%)")
 
+        # 显示贝叶斯可靠性统计
+        if hasattr(weighting_model, 'bayesian_details') and weighting_model.bayesian_details:
+            print(f"\n【贝叶斯可靠性统计】")
+            bayesian_upgraded = sum(1 for d in weighting_model.bayesian_details if d['scoring_type'] == 'bayesian_update')
+            bayesian_penalized = sum(1 for d in weighting_model.bayesian_details if d['scoring_type'] == 'uncertainty_penalty')
+
+            print(f"  - 贝叶斯更新车辆: {bayesian_upgraded} 辆 ({bayesian_upgraded/len(weighting_model.bayesian_details)*100:.1f}%)")
+            print(f"  - 不确定性惩罚车辆: {bayesian_penalized} 辆 ({bayesian_penalized/len(weighting_model.bayesian_details)*100:.1f}%)")
+
+            # 显示权重信息
+            if weighting_model.weights:
+                print(f"\n【PCA权重分配】")
+                for feature, weight in weighting_model.weights.items():
+                    print(f"  {feature}: {weight:.4f} ({weight*100:.2f}%)")
+
         print("\n" + "="*80)
-        print("✓ PCA 组合赋权模型完成！（含Transformer集成）")
+        print("✓ PCA 组合赋权模型完成！（含贝叶斯可靠性更新）")
         print("="*80 + "\n")
 
 
